@@ -843,3 +843,176 @@ function Acquire-Token()
         }
    }
 }
+
+function Format-Pem($StrBase64, $Label) {
+  $Pem = "-----BEGIN " + $Label + "-----`r`n"
+  for ($i = 0; $i -lt [Math]::Ceiling($StrBase64.Length / 64); $i ++) {
+    $StartIndex = $i * 64
+    $StrCount = 64
+    if ($StartIndex + $StrCount -gt $StrBase64.Length) {
+      $StrCount = $StrBase64.Length - $StartIndex
+    }
+    $Pem += ($StrBase64.Substring($StartIndex, $StrCount) + "`r`n")
+  }
+  $Pem += ("-----END " + $Label + "-----")
+  return($Pem)
+}
+
+function Request-P2PCert() 
+{
+    [cmdletbinding()]
+    Param (
+        [Parameter(Mandatory=$True)]
+        [string]$Username,        
+        [Parameter(Mandatory=$False)]
+        [string]$Password,
+        [Parameter(Mandatory=$False)]
+        [bool]$Whfb
+    ) Process 
+    {
+        Add-Type -TypeDefinition $AADTokenBrokerDefitions
+
+        $nonce = Get-Nonce
+        $Tenantid = Get-TenantId -Username $Username
+        $payload = @{
+            "client_id" = "29d9ed98-a469-4536-ade2-f981bc1d605e"
+            "request_nonce" = $nonce
+            "scope" = "openid aza ugs"
+            "win_ver" = "10.0.19041.3996"
+            "grant_type" = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+            "username" = $Username
+        }
+
+        if ($Whfb)
+        {
+            $Keyname = Get-WhfbKeyName -Username $Username
+            $assertion = Get-WhfbAssertion -Keyname $Keyname -Tenantid $Tenantid -Username $Username -Nonce $nonce
+            $payload["assertion"] = $assertion
+            $payload["grant_type"] = "urn:ietf:params:oauth:grant-type:jwt-bearer"                
+        } 
+        else
+        {
+            $payload["password"] = $Password
+            $payload["grant_type"] = "password"
+        }
+
+        $payloadStr = $payload | ConvertTo-Json        
+        $returnBuffer = [AADTokenBroker]::SignPayload($payloadStr)
+        $signedjwt = ($returnBuffer | ConvertFrom-Json).assertion
+
+        $body = @{
+            grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+            request = $signedjwt
+        }
+
+        $url = "https://login.microsoftonline.com/common/oauth2/token"
+        $response = Invoke-RestMethod -Uri $url -Method Post -Body $body
+
+        $Ksp = "Microsoft Software Key Storage Provider"
+        $PrivateKey = New-Object -ComObject 'X509Enrollment.CX509PrivateKey'
+        $PrivateKey.ProviderName = $Ksp
+        $PrivateKey.KeySpec = 1
+        $PrivateKey.MachineContext = 0
+        $PrivateKey.ExportPolicy = 2
+        $PrivateKey.Length = 2048
+        $PrivateKey.Create()
+
+        $CertificateRequestObject = New-Object -ComObject 'X509Enrollment.CX509CertificateRequestPkcs10'
+        $CertificateRequestObject.InitializeFromPrivateKey(
+                1,
+                $PrivateKey, 
+                [String]::Empty
+            )
+        $SubjectEncodingFlag = $X500NameFlags.XCN_CERT_NAME_STR_DISABLE_UTF8_DIR_STR_FLAG
+        $Subject = "CN=user@user.com"
+        $SubjectDnObject = New-Object -ComObject "X509Enrollment.CX500DistinguishedName"
+        $SubjectDnObject.Encode(
+            $Subject,
+            $SubjectEncodingFlag
+        )
+        $CertificateRequestObject.Subject = $SubjectDnObject
+
+        $HashAlgorithmObject = New-Object -ComObject X509Enrollment.CObjectId
+        $SignatureHashAlgorithm = "SHA256"
+        $HashAlgorithmObject.InitializeFromAlgorithmName(
+                $ObjectIdGroupId.XCN_CRYPT_HASH_ALG_OID_GROUP_ID,
+                $ObjectIdPublicKeyFlags.XCN_CRYPT_OID_INFO_PUBKEY_ANY,
+                $AlgorithmFlags.AlgorithmFlagNone,
+                $SignatureHashAlgorithm
+            )
+        $CertificateRequestObject.HashAlgorithm = $HashAlgorithmObject
+        $CertificateRequestObject.SuppressDefaults = $true
+        $EnrollmentObject = New-Object -ComObject 'X509Enrollment.CX509Enrollment'
+        $EnrollmentObject.InitializeFromRequest($CertificateRequestObject)
+        $CertificateRequest = $EnrollmentObject.CreateRequest($EncodingType.XCN_CRYPT_STRING_BASE64REQUESTHEADER) 
+        
+        $csrBody = $CertificateRequest -replace "-----.*"
+        $csrBody = $csrBody.Replace("`r`n", "")
+        
+        $payload = @{
+            "iss" = "aad:brokerplugin"
+            "grant_type" = "refresh_token"
+            "aud" = "login.microsoftonline.com"
+            "request_nonce" = $nonce
+            "scope" = "openid aza ugs"
+            "refresh_token" = $response.refresh_token
+            "client_id" = "38aa3b87-a06d-4817-b275-7a316988d93b"
+            "cert_token_use" = "user_cert"
+            "csr_type" = "http://schemas.microsoft.com/windows/pki/2009/01/enrollment#PKCS10"
+            "csr" = $csrBody
+        }
+
+        $payloadStr = $payload | ConvertTo-Json
+        $sessionKeyJwe = $response.session_key_jwe
+        $signedjwt = [AADTokenBroker]::CreateJWS($tenantid, $sessionKeyJwe, $payloadStr)
+
+        $body = @{
+            "grant_type" = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+            "request" = $signedjwt
+            "windows_api_version" = "2.2"
+        }
+
+        $url = "https://login.microsoftonline.com/common/oauth2/token"
+        $response = Invoke-RestMethod -Uri $url -Method Post -Body $body
+
+        $headerJwt = $response.Split('.')[0]
+        $headerJson = Base64Decode($headerJwt)
+        $ctx = (ConvertFrom-Json $headerJson).ctx
+        $iv = $response.Split('.')[2]
+        $cipherText = $response.Split('.')[3]
+
+        $text = [AADTokenBroker]::DecryptWithSessionkey($tenantid, $sessionKeyJwe.Split('.')[1], $ctx, $iv, $cipherText)
+        $responseJson = (ConvertFrom-Json $text)
+
+        $CertificateRequestObject = New-Object -ComObject 'X509Enrollment.CX509CertificateRequestCertificate'
+        $CertificateRequestObject.InitializeFromPrivateKey(
+            1,
+            $PrivateKey, 
+            [String]::Empty
+        )
+        $EnrollmentObject = New-Object -ComObject 'X509Enrollment.CX509Enrollment'
+        $EnrollmentObject.InitializeFromRequest($CertificateRequestObject)
+        $CertificateRequest = $EnrollmentObject.CreateRequest($EncodingType.XCN_CRYPT_STRING_BASE64REQUESTHEADER)
+
+        $EnrollmentObject.InstallResponse(
+                0x4,
+                $CertificateRequest, 
+                $EncodingType.XCN_CRYPT_STRING_BASE64REQUESTHEADER,
+                [String]::Empty
+            )
+                
+        $CertificateObject = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+        $CertificateObject.Import([Convert]::FromBase64String($EnrollmentObject.Certificate()))
+        $Cert = Get-ChildItem Cert:\CurrentUser\My | ? {$_.Thumbprint -eq $CertificateObject.Thumbprint}
+        $RSACng = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Cert)
+        $KeyBytes = $RSACng.Key.Export([System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
+        $base64PrivateKey = [Convert]::ToBase64String($KeyBytes)
+        Remove-Item -Path "Cert:\CurrentUser\My\$($CertificateObject.Thumbprint)"
+
+        $PemCert = Format-Pem $responseJson.x5c 'CERTIFICATE'
+        $PemKey = Format-Pem $base64PrivateKey 'PRIVATE KEY'
+
+        [System.IO.File]::WriteAllText("p2pcert.crt", $PemCert)
+        [System.IO.File]::WriteAllText("p2pcert.key", $PemKey)
+    }
+}

@@ -54,3 +54,11 @@ PS C:\> $response = Acquire-Token -Username employee01@*******.onmicrosoft.com -
 PS C:\> $response.access_token
 eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsIng1dCI6InEtMjNmYWxldlpoaEQzaG05Q1Fia1A1TVF5VSIsImtpZCI6InEtMjNmYWxldlpoaEQzaG05Q1Fia1A1TVF5VSJ9.eyJhdWDlQzZGItOWQ0Ni1mZTgxYTY1Y2ZkZWEvIiwiaWF0Ij4LCJuYmYiOjE3MTE3MDk3MjgsImV4cCI6MTcxMTcxNDYyNSwiYWNyIjoiMiIsImFpbyI6IkFiUUFTLzhXQUFBQXN5K1BjUUZZZnpuK2tldUxEaXhyQ2h6TzB0Tm(redacted)pWZDBlZWY1cmp1VWdQQUEiLCJ2ZXIiOiIxLjAifQ.DaByirnDkLbsHLBVV2neoSVDjAdIXOcwVVlJIr6S-uBWzqjel3lvwPRZM8lvtoyLRqg3A4JoQt7nZc8TCB1L6s69Src33DC9woArh8PwcUaOguGnMJANV5s-qhfg8ot9yNkf9W24Bxg4LzlUnXsmZS5dfNOuhVkbfz2MJ9nm3b_qtNYK1fZpuuOLR49DByFWvGRw
 ```
+
+### Request-P2P
+
+Request any user's P2P cert with their credentials
+
+```
+PS C:\> Request-P2PCert -Username globaladmin@****.onmicrosoft.com -Password *******
+```
